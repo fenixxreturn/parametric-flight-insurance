@@ -20,6 +20,7 @@ contract Deploy is Script {
         uint256 pk = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(pk);
         address admin = vm.envOr("ADMIN", deployer);
+        require(admin != address(0), "ADMIN is zero");
         address router = vm.envOr("FUNCTIONS_ROUTER", address(0));
         uint64 window = uint64(vm.envOr("REPORT_WINDOW", uint256(2 days)));
 

@@ -14,7 +14,7 @@ import {IFlightOracle} from "./IFlightOracle.sol";
 ///      A production version would inherit `FunctionsClient` and call `_sendRequest` with the JS
 ///      source, subscription id and DON id; here the request is just an event so the demo stays
 ///      dependency-free. The response is ABI-encoded `(uint8 status, uint32 delayMinutes)`;
-///      decoding into the enum reverts on out-of-range values.
+///      out-of-range values are reported as a failure.
 contract FunctionsFlightOracle is Ownable2Step {
     IFlightOracle public immutable insurance;
     address public immutable router;
@@ -44,7 +44,10 @@ contract FunctionsFlightOracle is Ownable2Step {
     }
 
     /// @notice Router callback carrying the DON's answer (or error) for `requestId`.
-    /// @dev A failed or rejected answer clears the request; the owner can simply request again.
+    /// @dev Never reverts on a known request: a DON error, a malformed response or a report the pool
+    ///      rejects all consume the request and emit `StatusFailed`; the owner can request again.
+    ///      (A real router does not retry a reverted callback, and a revert here would leave the
+    ///      request open for a stale answer to be replayed later.)
     function handleOracleFulfillment(bytes32 requestId, bytes calldata response, bytes calldata err) external {
         if (msg.sender != router) revert OnlyRouter();
         bytes32 key = pending[requestId];
@@ -54,9 +57,22 @@ contract FunctionsFlightOracle is Ownable2Step {
             emit StatusFailed(requestId, key, err);
             return;
         }
-        (IFlightOracle.FlightStatus status, uint32 delayMinutes) =
-            abi.decode(response, (IFlightOracle.FlightStatus, uint32));
-        insurance.reportFlight(key, status, delayMinutes);
-        emit StatusFulfilled(requestId, key);
+        uint256 status;
+        uint256 delayMinutes;
+        if (response.length == 64) (status, delayMinutes) = abi.decode(response, (uint256, uint256));
+        if (
+            response.length != 64 || status > uint8(IFlightOracle.FlightStatus.Cancelled)
+                || delayMinutes > type(uint32).max
+        ) {
+            emit StatusFailed(requestId, key, "malformed response");
+            return;
+        }
+        // casting is safe: both values were range-checked above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        try insurance.reportFlight(key, IFlightOracle.FlightStatus(status), uint32(delayMinutes)) {
+            emit StatusFulfilled(requestId, key);
+        } catch (bytes memory reason) {
+            emit StatusFailed(requestId, key, reason);
+        }
     }
 }

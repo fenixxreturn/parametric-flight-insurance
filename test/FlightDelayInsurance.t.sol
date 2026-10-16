@@ -503,7 +503,8 @@ contract FlightDelayInsuranceTest is Base {
         vm.expectRevert(FunctionsFlightOracle.UnknownRequest.selector);
         vm.prank(router);
         a.handleOracleFulfillment(bytes32("bad"), "", "");
-        vm.expectRevert(); // out-of-range enum fails abi.decode
+        vm.expectEmit(true, true, false, true, address(a)); // out-of-range enum: consumed as a failure
+        emit FunctionsFlightOracle.StatusFailed(req, key, "malformed response");
         vm.prank(router);
         a.handleOracleFulfillment(req, abi.encode(uint8(7), uint32(0)), "");
     }

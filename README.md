@@ -60,14 +60,16 @@ test/                        unit, fuzz, invariant and upgrade tests
   collisions.
 - **Oracle decoupling:** the pool exposes `IFlightOracle.reportFlight`. Any feed (Chainlink Functions,
   a multisig, another provider) can be plugged in by giving it `ORACLE_ROLE`. `FunctionsFlightOracle` shows
-  the Chainlink Functions shape: router-only fulfilment, request-id matching, and an error path that
-  leaves the flight open so the request can be retried.
+  the Chainlink Functions shape: router-only fulfilment and request-id matching. The callback never
+  reverts on a known request: a DON error, a malformed answer or a report the pool rejects (e.g. too
+  early) consumes the request and emits `StatusFailed`, leaving the flight open for a fresh request.
+  A stale answer can't be replayed later.
 
 ## Running
 
 ```bash
 forge build
-forge test                 # 48 tests: unit, fuzz (256 runs), invariant (64 runs x 32 depth)
+forge test                 # 53 tests: unit, fuzz (256 runs), invariant (64 runs x 32 depth)
 forge test --gas-report
 forge snapshot             # writes .gas-snapshot
 ```
@@ -98,6 +100,9 @@ PRIVATE_KEY=... ASSET=<usdc> ADMIN=<multisig> FUNCTIONS_ROUTER=<router> \
   - the per-LP share balances add up to `totalShares`
 - **Upgrade test:** deploy the proxy, take positions, upgrade to a V2 mock, confirm all state and roles
   are preserved and that the upgraded pool still settles and pays. A non-admin upgrade reverts.
+- **Review tests** (`test/review/`): adapter failure handling, the deploy script's zero-admin guard,
+  and two tests that demonstrate the known limitations below (LP exit before a known loss, share maths
+  after repeated total wipe-outs).
 - **Mutation check:** we removed each key guard one at a time (pool cap, flight cap, withdrawal lock,
   sale cutoff, exposure release, liability booking, the claimed flag, report time check, expiry window,
   virtual shares, upgrade authorisation, tier ordering). Every removal made at least one test fail.
@@ -114,11 +119,24 @@ This is a demo and has **not been audited**.
   pricing is only as good as the admin's.
 - **LP liquidity can be locked.** Capital reserved against open flights can't be withdrawn until those
   flights settle or expire. There is no withdrawal queue: free liquidity goes to whoever withdraws first.
+- **LPs can exit ahead of a known loss.** Shares are priced on `totalLiquidity`, which only drops when
+  the oracle reports. A delay is public before the report, so an LP can withdraw free liquidity at the
+  pre-loss price and leave the loss to the remaining LPs (and a new depositor can walk into it). A
+  production pool needs a withdrawal cooldown or epoch-based redemptions.
+- **Sales can be adversely selected.** Cancellations (and long delays) are often public before the sale
+  cutoff, and buyers can act on them before the oracle reports. Set `saleCutoff` well before departure
+  and have the oracle report `Cancelled` as soon as it is known.
+- **Total wipe-outs degrade share maths.** If a payout takes `totalLiquidity` to zero while shares are
+  outstanding, old shares become worthless and the next deposit mints a huge number of shares. After a
+  handful of such wipe-outs the share maths overflows and deposits revert; redeploy the pool instead.
 - **Correlated risk.** Coverage is fully reserved per policy, so the pool can't become insolvent. But a
   storm that delays many flights can wipe out a large part of LP capital. Per-flight caps limit this;
   there are no portfolio-level caps and no reinsurance.
 - **Expiry refunds return premiums**, so LPs earn nothing on flights the oracle never reported.
 - **Pausing during a report window** can push flights into expiry, which means refunds instead of payouts.
+  "Claims keep working while paused" means policyholders get at least their premium back, not a payout.
+- **Report time checks are coarse.** `Delayed(n)` is checked against scheduled *departure*, not arrival,
+  and `OnTime` is accepted from departure. They stop obviously premature reports only; the oracle is trusted.
 - **Standard ERC-20 only:** no fee-on-transfer or rebasing tokens. With USDC, a blacklisted holder's
   claim reverts and their payout stays owed in the pool. There is no redirect.
 - **Policies are not transferable** (a plain mapping, not an ERC-721).
